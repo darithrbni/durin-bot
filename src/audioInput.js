@@ -28,14 +28,15 @@ export class AudioInput extends EventEmitter {
     this.speechConfirmed = false;
     this.pendingFrames = [];
     this.destroyed = false;
+    this.speakingHandler = null;
   }
 
   async start() {
     if (this.destroyed) return;
 
     this.vad = await NonRealTimeVAD.new({
-      positiveSpeechThreshold: 0.72,
-      negativeSpeechThreshold: 0.57,
+      positiveSpeechThreshold: 0.55,
+      negativeSpeechThreshold: 0.40,
       redemptionFrames: 6, // ~576ms silence before speechEnd
       minSpeechFrames: 2,
       preSpeechPadFrames: 1,
@@ -84,16 +85,11 @@ export class AudioInput extends EventEmitter {
       if (!this.destroyed) this.emit('error', err);
     });
 
-    this.opusStream = this.connection.receiver.subscribe(this.ownerUserId, {
-      end: {
-        behavior: EndBehaviorType.Manual,
-      },
-    });
-    this.opusStream.on('error', (err) => {
-      if (!this.destroyed) this.emit('error', err);
-    });
-
-    this.opusStream.pipe(this.opusDecoder).pipe(this.ffmpeg.stdin);
+    this.speakingHandler = (userId) => {
+      if (userId !== this.ownerUserId || this.destroyed || this.opusStream) return;
+      this._subscribeToOwner();
+    };
+    this.connection.receiver.speaking.on('start', this.speakingHandler);
 
     this.ffmpeg.stdout.on('data', (chunk) => {
       if (this.destroyed) return;
@@ -113,6 +109,22 @@ export class AudioInput extends EventEmitter {
     });
   }
 
+  _subscribeToOwner() {
+    if (this.destroyed || this.opusStream) return;
+
+    this.opusStream = this.connection.receiver.subscribe(this.ownerUserId, {
+      end: {
+        behavior: EndBehaviorType.Manual,
+      },
+    });
+    this.opusStream.on('error', (err) => {
+      if (!this.destroyed) this.emit('error', err);
+    });
+
+    this.opusStream.pipe(this.opusDecoder).pipe(this.ffmpeg.stdin);
+    console.log('[AudioInput] Subscribed to owner speech stream');
+  }
+
   async _processVadFrame(frameBuffer) {
     if (this.destroyed || !this.vad?.frameProcessor) return;
 
@@ -124,6 +136,7 @@ export class AudioInput extends EventEmitter {
     const result = await this.vad.frameProcessor.process(float32);
 
     if (result.msg === Message.SpeechStart) {
+      console.log('[AudioInput] VAD speechStart');
       this.inVadSpeech = true;
       this.speechConfirmed = false;
       this.pendingFrames = [frameBuffer];
@@ -138,6 +151,7 @@ export class AudioInput extends EventEmitter {
     }
 
     if (result.msg === Message.SpeechEnd) {
+      console.log('[AudioInput] VAD speechEnd');
       if (this.speechConfirmed) {
         this.emit('audioFrame', frameBuffer);
         this.emit('speechEnd');
@@ -168,6 +182,15 @@ export class AudioInput extends EventEmitter {
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+
+    if (this.speakingHandler) {
+      try {
+        this.connection.receiver.speaking.off('start', this.speakingHandler);
+      } catch {
+        // Ignore cleanup errors
+      }
+      this.speakingHandler = null;
+    }
 
     this.pcmBuffer = Buffer.alloc(0);
     this.pendingFrames = [];

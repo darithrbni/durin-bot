@@ -25,11 +25,15 @@ export class GeminiLiveClient extends EventEmitter {
     this.intentionallyClosed = false;
     this.isRotating = false;
     this.ignoreCurrentTurnAudio = false;
+    this.loggedTurnAudio = false;
+    this.greetingSent = false;
   }
 
   async connect() {
     this.intentionallyClosed = false;
     this.isRotating = false;
+    this.loggedTurnAudio = false;
+    this.greetingSent = false;
 
     const apiKey = keyPool.getActiveKey();
     if (!apiKey) {
@@ -63,6 +67,7 @@ export class GeminiLiveClient extends EventEmitter {
           onopen: () => {
             this.isConnected = true;
             console.log('[GeminiLive] WebSocket session opened.');
+            setTimeout(() => this._sendInitialGreeting(), 0);
           },
           onmessage: (message) => {
             this._handleServerMessage(message);
@@ -93,6 +98,7 @@ export class GeminiLiveClient extends EventEmitter {
           },
         },
       });
+      this._sendInitialGreeting();
     } catch (err) {
       const msg = err?.message || String(err);
       if (isRateLimitMessage(msg, err?.status)) {
@@ -103,12 +109,36 @@ export class GeminiLiveClient extends EventEmitter {
     }
   }
 
+  _sendInitialGreeting() {
+    if (!this.session || !this.isConnected || this.greetingSent) return;
+    this.greetingSent = true;
+    try {
+      this.session.sendClientContent({
+        turns: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: 'Hello Durin, I just joined the voice channel. Say a brief hello.',
+              },
+            ],
+          },
+        ],
+        turnComplete: true,
+      });
+      console.log('[GeminiLive] Sent initial greeting prompt.');
+    } catch (err) {
+      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
   _handleServerMessage(message) {
     const serverContent = message?.serverContent;
     if (!serverContent) return;
 
     if (serverContent.interrupted) {
       this.ignoreCurrentTurnAudio = false;
+      this.loggedTurnAudio = false;
       return;
     }
 
@@ -119,6 +149,10 @@ export class GeminiLiveClient extends EventEmitter {
         if (inlineData?.data && (!inlineData.mimeType || inlineData.mimeType.startsWith('audio/'))) {
           const pcmBuffer = Buffer.from(inlineData.data, 'base64');
           if (pcmBuffer.length > 0) {
+            if (!this.loggedTurnAudio) {
+              console.log(`[GeminiLive] Received audio chunk (${pcmBuffer.length} bytes)`);
+              this.loggedTurnAudio = true;
+            }
             this.emit('audioData', pcmBuffer);
           }
         }
@@ -127,6 +161,8 @@ export class GeminiLiveClient extends EventEmitter {
 
     if (serverContent.turnComplete) {
       this.ignoreCurrentTurnAudio = false;
+      this.loggedTurnAudio = false;
+      console.log('[GeminiLive] Turn complete');
       this.emit('turnComplete');
     }
   }
