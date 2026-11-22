@@ -8,7 +8,9 @@ import { NonRealTimeVAD, Message } from '@ricky0123/vad-node';
 const FRAME_SAMPLES = 1536; // 96ms at 16kHz (Silero VAD optimal frame size)
 const BYTES_PER_SAMPLE = 2; // 16-bit signed LE
 const FRAME_BYTES = FRAME_SAMPLES * BYTES_PER_SAMPLE; // 3072 bytes
-const CONFIRM_SPEECH_FRAMES = 2; // ~192ms-200ms confirmation before barge-in
+const CONFIRM_SPEECH_FRAMES = 2; // ~192ms confirmation before emitting speechStart
+const SILENCE_WATCHDOG_MS = 650;
+const SILENCE_FLUSH_FRAMES = 7;
 
 export class AudioInput extends EventEmitter {
   constructor(connection, ownerUserId) {
@@ -29,16 +31,17 @@ export class AudioInput extends EventEmitter {
     this.pendingFrames = [];
     this.destroyed = false;
     this.speakingHandler = null;
+    this.silenceTimeout = null;
   }
 
   async start() {
     if (this.destroyed) return;
 
     this.vad = await NonRealTimeVAD.new({
-      positiveSpeechThreshold: 0.55,
-      negativeSpeechThreshold: 0.40,
+      positiveSpeechThreshold: 0.72,
+      negativeSpeechThreshold: 0.55,
       redemptionFrames: 6, // ~576ms silence before speechEnd
-      minSpeechFrames: 2,
+      minSpeechFrames: 3,
       preSpeechPadFrames: 1,
       frameSamples: FRAME_SAMPLES,
     });
@@ -106,7 +109,37 @@ export class AudioInput extends EventEmitter {
             if (!this.destroyed) this.emit('error', err);
           });
       }
+
+      if (this.inVadSpeech) {
+        this._armSilenceWatchdog();
+      }
     });
+  }
+
+  _clearSilenceWatchdog() {
+    if (this.silenceTimeout !== null) {
+      clearTimeout(this.silenceTimeout);
+      this.silenceTimeout = null;
+    }
+  }
+
+  _armSilenceWatchdog() {
+    if (this.destroyed || !this.inVadSpeech) return;
+    this._clearSilenceWatchdog();
+
+    this.silenceTimeout = setTimeout(() => {
+      this.silenceTimeout = null;
+      if (this.destroyed || !this.inVadSpeech) return;
+
+      console.log('[AudioInput] Silence watchdog: flushing VAD segment');
+      for (let i = 0; i < SILENCE_FLUSH_FRAMES; i++) {
+        this.vadQueue = this.vadQueue
+          .then(() => this._processVadFrame(Buffer.alloc(FRAME_BYTES)))
+          .catch((err) => {
+            if (!this.destroyed) this.emit('error', err);
+          });
+      }
+    }, SILENCE_WATCHDOG_MS);
   }
 
   _subscribeToOwner() {
@@ -140,10 +173,12 @@ export class AudioInput extends EventEmitter {
       this.inVadSpeech = true;
       this.speechConfirmed = false;
       this.pendingFrames = [frameBuffer];
+      this._armSilenceWatchdog();
       return;
     }
 
     if (result.msg === Message.VADMisfire) {
+      this._clearSilenceWatchdog();
       this.inVadSpeech = false;
       this.speechConfirmed = false;
       this.pendingFrames = [];
@@ -151,6 +186,7 @@ export class AudioInput extends EventEmitter {
     }
 
     if (result.msg === Message.SpeechEnd) {
+      this._clearSilenceWatchdog();
       console.log('[AudioInput] VAD speechEnd');
       if (this.speechConfirmed) {
         this.emit('audioFrame', frameBuffer);
@@ -179,9 +215,18 @@ export class AudioInput extends EventEmitter {
     }
   }
 
+  resetState() {
+    this._clearSilenceWatchdog();
+    this.inVadSpeech = false;
+    this.speechConfirmed = false;
+    this.pendingFrames = [];
+  }
+
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+    this._clearSilenceWatchdog();
+    this.resetState();
 
     if (this.speakingHandler) {
       try {
@@ -193,9 +238,6 @@ export class AudioInput extends EventEmitter {
     }
 
     this.pcmBuffer = Buffer.alloc(0);
-    this.pendingFrames = [];
-    this.inVadSpeech = false;
-    this.speechConfirmed = false;
 
     if (this.opusStream) {
       try {

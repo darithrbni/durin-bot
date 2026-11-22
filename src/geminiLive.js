@@ -24,7 +24,6 @@ export class GeminiLiveClient extends EventEmitter {
     this.isConnected = false;
     this.intentionallyClosed = false;
     this.isRotating = false;
-    this.ignoreCurrentTurnAudio = false;
     this.loggedTurnAudio = false;
     this.greetingSent = false;
   }
@@ -137,13 +136,12 @@ export class GeminiLiveClient extends EventEmitter {
     if (!serverContent) return;
 
     if (serverContent.interrupted) {
-      this.ignoreCurrentTurnAudio = false;
       this.loggedTurnAudio = false;
       return;
     }
 
     const parts = serverContent.modelTurn?.parts;
-    if (Array.isArray(parts) && !this.ignoreCurrentTurnAudio) {
+    if (Array.isArray(parts)) {
       for (const part of parts) {
         const inlineData = part?.inlineData;
         if (inlineData?.data && (!inlineData.mimeType || inlineData.mimeType.startsWith('audio/'))) {
@@ -160,7 +158,6 @@ export class GeminiLiveClient extends EventEmitter {
     }
 
     if (serverContent.turnComplete) {
-      this.ignoreCurrentTurnAudio = false;
       this.loggedTurnAudio = false;
       console.log('[GeminiLive] Turn complete');
       this.emit('turnComplete');
@@ -189,7 +186,6 @@ export class GeminiLiveClient extends EventEmitter {
   sendAudioChunk(pcm16kBase64) {
     if (!this.session || !this.isConnected || this.intentionallyClosed) return;
     try {
-      this.ignoreCurrentTurnAudio = false;
       this.session.sendRealtimeInput({
         audio: {
           data: pcm16kBase64,
@@ -201,8 +197,7 @@ export class GeminiLiveClient extends EventEmitter {
     }
   }
 
-  sendInterrupt() {
-    this.ignoreCurrentTurnAudio = true;
+  endAudioTurn() {
     if (!this.session || !this.isConnected || this.intentionallyClosed) return;
     try {
       this.session.sendRealtimeInput({
@@ -227,7 +222,6 @@ export class GeminiLiveClient extends EventEmitter {
 
   disconnect() {
     this.intentionallyClosed = true;
-    this.ignoreCurrentTurnAudio = false;
     this._closeSocketOnly();
     this.currentKey = null;
   }

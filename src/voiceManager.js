@@ -1,5 +1,6 @@
 import path from 'node:path';
 import {
+  AudioPlayerStatus,
   VoiceConnectionStatus,
   entersState,
   joinVoiceChannel,
@@ -83,15 +84,24 @@ export class VoiceManager {
     this.geminiLive = new GeminiLiveClient();
     this.audioInput = new AudioInput(connection, config.ownerUserId);
 
+    this.audioOutput.player.on(AudioPlayerStatus.Idle, () => {
+      this.audioInput?.resetState();
+    });
+
     this.audioInput.on('speechStart', () => {
       if (this.audioOutput?.isPlaying()) {
-        this.audioOutput.interrupt();
-        this.geminiLive?.sendInterrupt();
+        console.log('[VoiceManager] Ignoring mic input while Durin is speaking.');
       }
     });
 
     this.audioInput.on('audioFrame', (pcm16kBuffer) => {
+      if (this.audioOutput?.isPlaying()) return;
       this.geminiLive?.sendAudioChunk(pcm16kBuffer.toString('base64'));
+    });
+
+    this.audioInput.on('speechEnd', () => {
+      if (this.audioOutput?.isPlaying()) return;
+      this.geminiLive?.endAudioTurn();
     });
 
     this.audioInput.on('error', (err) => {
@@ -100,6 +110,11 @@ export class VoiceManager {
 
     this.geminiLive.on('audioData', (pcm24kBuffer) => {
       this.audioOutput?.enqueueAudio(pcm24kBuffer);
+    });
+
+    this.geminiLive.on('turnComplete', () => {
+      this.audioOutput?.endTurn();
+      this.audioInput?.resetState();
     });
 
     this.geminiLive.on('error', (err) => {

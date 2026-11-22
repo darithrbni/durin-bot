@@ -31,9 +31,11 @@ export class AudioOutput {
 
   _ensureStreamPipeline() {
     if (this.destroyed) return;
-    if (this.passThrough && this.ffmpeg && !this.passThrough.destroyed) {
+    if (this.passThrough && this.ffmpeg && !this.passThrough.destroyed && !this.passThrough.writableEnded) {
       return;
     }
+
+    this._teardownPipeline();
 
     this.passThrough = new PassThrough();
     this.passThrough.on('error', (err) => {
@@ -94,6 +96,15 @@ export class AudioOutput {
     this._ensureStreamPipeline();
     if (this.passThrough && !this.passThrough.destroyed) {
       this.passThrough.write(pcm24kBuffer);
+    }
+  }
+
+  endTurn() {
+    if (this.destroyed || !this.passThrough || this.passThrough.destroyed || this.passThrough.writableEnded) return;
+    try {
+      this.passThrough.end();
+    } catch {
+      // Ignore cleanup errors
     }
   }
 
