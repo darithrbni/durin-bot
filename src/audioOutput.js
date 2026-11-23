@@ -8,6 +8,8 @@ import {
   createAudioResource,
 } from '@discordjs/voice';
 import ffmpegPath from 'ffmpeg-static';
+import { config } from './config.js';
+import { convert } from './rvcConverter.js';
 
 export class AudioOutput {
   constructor(connection) {
@@ -26,15 +28,13 @@ export class AudioOutput {
 
     this.passThrough = null;
     this.ffmpeg = null;
+    this.pendingChunks = [];
+    this.isConverting = false;
+    this.turnGeneration = 0;
     this.destroyed = false;
   }
 
-  _ensureStreamPipeline() {
-    if (this.destroyed) return;
-    if (this.passThrough && this.ffmpeg && !this.passThrough.destroyed && !this.passThrough.writableEnded) {
-      return;
-    }
-
+  _spawnFfmpegPipeline(inputArgs) {
     this._teardownPipeline();
 
     this.passThrough = new PassThrough();
@@ -48,9 +48,7 @@ export class AudioOutput {
       ffmpegPath,
       [
         '-loglevel', 'error',
-        '-f', 's16le',
-        '-ar', '24000',
-        '-ac', '1',
+        ...inputArgs,
         '-i', 'pipe:0',
         '-f', 's16le',
         '-ar', '48000',
@@ -91,16 +89,66 @@ export class AudioOutput {
     this.player.play(resource);
   }
 
+  _ensureStreamPipeline() {
+    if (this.destroyed) return;
+    if (this.passThrough && this.ffmpeg && !this.passThrough.destroyed && !this.passThrough.writableEnded) {
+      return;
+    }
+
+    this._spawnFfmpegPipeline(['-f', 's16le', '-ar', '24000', '-ac', '1']);
+  }
+
+  _playWavBuffer(wavBuffer) {
+    if (this.destroyed || !wavBuffer || wavBuffer.length === 0) return;
+    this._spawnFfmpegPipeline(['-f', 'wav']);
+    if (this.passThrough && !this.passThrough.destroyed) {
+      this.passThrough.write(wavBuffer);
+      this.passThrough.end();
+    }
+  }
+
   enqueueAudio(pcm24kBuffer) {
     if (this.destroyed || !pcm24kBuffer || pcm24kBuffer.length === 0) return;
+
+    if (config.rvcEnabled) {
+      this.pendingChunks.push(pcm24kBuffer);
+      return;
+    }
+
     this._ensureStreamPipeline();
     if (this.passThrough && !this.passThrough.destroyed) {
       this.passThrough.write(pcm24kBuffer);
     }
   }
 
-  endTurn() {
-    if (this.destroyed || !this.passThrough || this.passThrough.destroyed || this.passThrough.writableEnded) return;
+  async endTurn() {
+    if (this.destroyed) return;
+
+    if (config.rvcEnabled) {
+      if (this.pendingChunks.length === 0) return;
+
+      const pcmBuffer = Buffer.concat(this.pendingChunks);
+      this.pendingChunks = [];
+      this.isConverting = true;
+      const generation = this.turnGeneration;
+
+      try {
+        const wavBuffer = await convert(pcmBuffer);
+        if (this.destroyed || generation !== this.turnGeneration) return;
+        this._playWavBuffer(wavBuffer);
+      } catch (err) {
+        if (!this.destroyed) {
+          console.error('[AudioOutput] RVC turn playback error:', err.message);
+        }
+      } finally {
+        if (generation === this.turnGeneration) {
+          this.isConverting = false;
+        }
+      }
+      return;
+    }
+
+    if (!this.passThrough || this.passThrough.destroyed || this.passThrough.writableEnded) return;
     try {
       this.passThrough.end();
     } catch {
@@ -132,10 +180,17 @@ export class AudioOutput {
     }
   }
 
-  interrupt() {
+  stop() {
     if (this.destroyed) return;
+    this.turnGeneration++;
+    this.pendingChunks = [];
+    this.isConverting = false;
     this.player.stop(true);
     this._teardownPipeline();
+  }
+
+  interrupt() {
+    this.stop();
   }
 
   playLocalFile(filePath) {
@@ -192,12 +247,19 @@ export class AudioOutput {
   }
 
   isPlaying() {
-    return this.player.state.status !== AudioPlayerStatus.Idle;
+    return (
+      this.pendingChunks.length > 0 ||
+      this.isConverting ||
+      this.player.state.status !== AudioPlayerStatus.Idle
+    );
   }
 
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.turnGeneration++;
+    this.pendingChunks = [];
+    this.isConverting = false;
     try {
       this.player.stop(true);
       this.player.removeAllListeners();
