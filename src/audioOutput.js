@@ -44,12 +44,15 @@ export class AudioOutput {
       }
     });
 
+    const isWavInput = inputArgs[inputArgs.indexOf('-f') + 1] === 'wav';
+
     this.ffmpeg = spawn(
       ffmpegPath,
       [
         '-loglevel', 'error',
         ...inputArgs,
         '-i', 'pipe:0',
+        ...(isWavInput ? ['-af', 'silenceremove=stop_periods=-1:stop_duration=0.25:stop_threshold=-45dB'] : []),
         '-f', 's16le',
         '-ar', '48000',
         '-ac', '2',
@@ -131,10 +134,12 @@ export class AudioOutput {
       this.pendingChunks = [];
       this.isConverting = true;
       const generation = this.turnGeneration;
+      const conversionStartedAt = Date.now();
 
       try {
         const wavBuffer = await convert(pcmBuffer);
         if (this.destroyed || generation !== this.turnGeneration) return;
+        console.log(`[AudioOutput] RVC conversion finished in ${Date.now() - conversionStartedAt}ms, playing Durin's voice...`);
         this._playWavBuffer(wavBuffer);
       } catch (err) {
         if (!this.destroyed) {

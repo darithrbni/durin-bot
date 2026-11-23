@@ -85,6 +85,7 @@ export class VoiceManager {
     this.audioInput = new AudioInput(connection, config.ownerUserId);
 
     this.audioOutput.player.on(AudioPlayerStatus.Idle, () => {
+      console.log('[VoiceManager] Durin finished speaking — listening now.');
       this.audioInput?.resetState();
     });
 
